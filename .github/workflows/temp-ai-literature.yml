@@ -1,0 +1,36 @@
+name: Build AI Chemistry Education Literature Dataset
+
+on:
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'tools/generate_ai_chemistry_literature.py'
+      - '.github/workflows/temp-ai-literature.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate open-access literature dataset
+        run: python tools/generate_ai_chemistry_literature.py
+
+      - name: Upload literature dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-chemistry-education-literature
+          path: output/
+          if-no-files-found: error
+          retention-days: 3
