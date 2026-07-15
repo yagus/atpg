@@ -7,7 +7,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 
 API = "https://api.openalex.org/works"
@@ -61,10 +61,17 @@ EDU_TERMS = [
     "classroom", "instruction", "pedagogy", "curriculum", "assessment", "feedback",
     "tutor", "tutoring", "learner", "learners", "academic", "school", "university"
 ]
+STRONG_EDU_TERMS = [
+    "education", "educational", "teaching", "student", "students", "teacher", "teachers",
+    "classroom", "instruction", "instructional", "pedagogy", "pedagogical", "curriculum",
+    "assessment", "feedback", "tutor", "tutoring", "learner", "learners", "school",
+    "university", "higher education", "academic integrity", "course", "courses",
+    "learning outcomes", "conceptual understanding", "science literacy"
+]
 CHEM_TERMS = [
-    "chemistry", "chemical education", "chemical concept", "molecular", "stoichiometry",
+    "chemistry", "chemical education", "chemical concept", "stoichiometry",
     "organic chemistry", "inorganic chemistry", "physical chemistry", "analytical chemistry",
-    "biochemistry", "laboratory chemistry", "chemistry learning"
+    "biochemistry education", "laboratory chemistry", "chemistry learning", "chemistry teaching"
 ]
 SCIENCE_TERMS = [
     "science education", "science learning", "science teaching", "stem education", "stem learning",
@@ -86,6 +93,11 @@ MEANINGFUL_TERMS = [
     "meaningful learning", "conceptual understanding", "engagement", "motivation", "inquiry",
     "active learning", "collaborative learning", "self-regulated learning", "deep learning approach",
     "authentic learning", "higher-order thinking"
+]
+NON_EDU_TITLE_TERMS = [
+    "drug discovery", "urban planning", "cancer diagnosis", "clinical diagnosis", "protein design",
+    "molecular dynamics", "materials discovery", "remote sensing", "financial forecasting",
+    "medical imaging", "autonomous driving", "cybersecurity", "supply chain", "climate modeling"
 ]
 NEGATIVE_DISCIPLINES = {
     "medicine": ["medical education", "medical students", "clinical education", "health professions education"],
@@ -139,10 +151,26 @@ def count_terms(text, terms):
     return sum(1 for term in terms if term in text)
 
 
-def classify(text):
-    if contains_any(text, CHEM_TERMS):
+def has_education_context(title, abstract):
+    title_text = f" {title.lower()} "
+    full_text = f" {title} {abstract} ".lower()
+    strong_count = count_terms(full_text, STRONG_EDU_TERMS)
+    title_has_context = contains_any(title_text, STRONG_EDU_TERMS)
+    if not title_has_context and strong_count < 2:
+        return False
+    if contains_any(title_text, NON_EDU_TITLE_TERMS) and not title_has_context:
+        return False
+    return True
+
+
+def classify(title, abstract):
+    title_text = f" {title.lower()} "
+    text = f" {title} {abstract} ".lower()
+    if contains_any(title_text, CHEM_TERMS) or (
+        contains_any(text, CHEM_TERMS) and count_terms(text, STRONG_EDU_TERMS) >= 2
+    ):
         return "A. AI dalam pembelajaran kimia"
-    if contains_any(text, SCIENCE_TERMS) or " stem " in f" {text} ":
+    if contains_any(title_text, SCIENCE_TERMS) or contains_any(text, SCIENCE_TERMS) or " stem " in f" {text} ":
         return "B. AI dalam pembelajaran sains/STEM"
     if contains_any(text, SCAFFOLD_TERMS):
         return "C. AI sebagai pemantik, tutor, scaffolding, atau umpan balik"
@@ -157,11 +185,14 @@ def classify(text):
 
 def relevance_score(title, abstract, year, cited_by_count, query_hits):
     text = f" {title} {abstract} ".lower()
-    if not contains_any(text, AI_TERMS) or not contains_any(text, EDU_TERMS):
+    title_text = f" {title.lower()} "
+    if not contains_any(text, AI_TERMS) or not has_education_context(title, abstract):
         return -999
     score = 20
-    score += 22 * count_terms(text, CHEM_TERMS)
-    score += 10 * count_terms(text, SCIENCE_TERMS)
+    score += 25 * count_terms(title_text, CHEM_TERMS)
+    score += 10 * min(3, count_terms(text, CHEM_TERMS))
+    score += 12 * count_terms(title_text, SCIENCE_TERMS)
+    score += 8 * min(3, count_terms(text, SCIENCE_TERMS))
     score += 7 * min(4, count_terms(text, CRITICAL_TERMS))
     score += 7 * min(4, count_terms(text, SCAFFOLD_TERMS))
     score += 6 * min(4, count_terms(text, EQUITY_TERMS))
@@ -176,6 +207,8 @@ def relevance_score(title, abstract, year, cited_by_count, query_hits):
     for terms in NEGATIVE_DISCIPLINES.values():
         if contains_any(text, terms):
             score -= 5
+    if contains_any(title_text, NON_EDU_TITLE_TERMS):
+        score -= 15
     if len(abstract) < 300:
         score -= 4
     return round(score, 3)
@@ -223,6 +256,8 @@ def extract_record(work):
     if source_type and source_type != "journal":
         return None
     if not title or not abstract or not doi or year < 2020 or year > 2026:
+        return None
+    if not has_education_context(title, abstract):
         return None
     authors = []
     for auth in work.get("authorships") or []:
@@ -281,18 +316,16 @@ def main():
         )
         if score < 20:
             continue
-        text = f" {rec['title']} {rec['abstract']} ".lower()
-        rec["category"] = classify(text)
+        rec["category"] = classify(rec["title"], rec["abstract"])
         rec["relevance_score"] = score
         rec["queries"] = " | ".join(sorted(rec["queries"]))
         candidates.append(rec)
 
     candidates.sort(key=lambda r: (-r["relevance_score"], -r["year"], -r["cited_by_count"], r["title"]))
 
-    # Preserve disciplinary relevance and thematic diversity.
     selected = []
     category_caps = {
-        "A. AI dalam pembelajaran kimia": 90,
+        "A. AI dalam pembelajaran kimia": 85,
         "B. AI dalam pembelajaran sains/STEM": 75,
         "C. AI sebagai pemantik, tutor, scaffolding, atau umpan balik": 75,
         "D. Berpikir kritis, asesmen, verifikasi, dan integritas akademik": 65,
@@ -309,7 +342,6 @@ def main():
         if len(selected) >= TARGET:
             break
 
-    # Fill to target without caps if needed.
     if len(selected) < TARGET:
         seen = {r["doi"] for r in selected}
         for rec in candidates:
@@ -346,10 +378,11 @@ def main():
         "fetch_log": fetch_log,
         "method_note": (
             "Records were discovered through the OpenAlex API, restricted to open-access journal articles "
-            "with DOI and abstract, publication years 2020-2026. Ranking emphasizes chemistry/science education, "
-            "AI as scaffold/tutor/feedback, critical thinking, meaningful learning, fairness, ethics, and access. "
-            "Scopus indexing was not individually verified; DOI and source links support follow-up checking in "
-            "Google Scholar, Scopus Sources, Crossref, and publisher pages."
+            "with DOI and abstract, publication years 2020-2026. A stricter education-context filter was applied "
+            "to remove technical AI papers that merely use the word learning. Ranking emphasizes chemistry/science "
+            "education, AI as scaffold/tutor/feedback, critical thinking, meaningful learning, fairness, ethics, "
+            "and access. Scopus indexing was not individually verified; DOI and source links support follow-up "
+            "checking in Google Scholar, Scopus Sources, Crossref, and publisher pages."
         ),
     }
     with open("output/manifest.json", "w", encoding="utf-8") as f:
